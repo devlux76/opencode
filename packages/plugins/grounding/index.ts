@@ -168,10 +168,10 @@ function pick(
   input: unknown,
   fields: Record<string, { type: "string" | "integer"; required: boolean }>,
 ): Record<string, unknown> | string {
-  const record = typeof input === "object" && input !== null ? input : {}
+  const record: Record<string, unknown> = typeof input === "object" && input !== null ? Object.fromEntries(Object.entries(input)) : {}
   const body: Record<string, unknown> = {}
   for (const [key, field] of Object.entries(fields)) {
-    const value: unknown = Reflect.get(record, key)
+    const value = record[key]
     const valid = field.type === "integer" ? Number.isInteger(value) && Number(value) >= 1 : typeof value === "string"
     if (valid) body[key] = value
     else if (field.required) return `Missing or invalid \`${key}\` (${field.type}).`
@@ -262,6 +262,7 @@ function userMessage(messages: ReadonlyArray<Message>, text: string): Message {
   const sample = messages.find((message) => message.role === "user") ?? messages[0]
   // Every primary request carries the user's prompt, so a sample exists; the fallback is for safety.
   if (!sample) return Object.assign(Object.create(null), init)
+  // oxlint-disable-next-line no-restricted-globals -- genuine reflection: the host's Message class cannot be imported
   const made: Message = Reflect.construct(sample.constructor, [init])
   return made
 }
