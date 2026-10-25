@@ -16,7 +16,7 @@ This is our own OpenCode, forked from `anomalyco/opencode`. Our branch is `local
 - Work in a git worktree branched from `local` (`.claude/worktrees/<short-name>`), never directly in the main checkout. Fast-forward `local` when the work is verified, then remove the worktree.
 - Keep `local` linear and never rewrite its history: no force-push, no rebase of published commits. Merges from upstream happen only through `opencode-update`.
 - Every change we make to upstream code gets a test, and that test gets a line in `local/tests.txt` so the daily update proves our patches still hold after each merge.
-- Prefer small, separate commits for separate concerns. Commit messages: a short imperative summary (prefix `local:` when the change exists only in our fork), a blank line, then a body that says why.
+- Prefer small, separate commits for separate concerns. Commit messages follow the repository rules below: one short imperative summary (prefix `local:` when the change exists only in our fork) citing `bug:<id>`; the why goes in the bug.
 - Deleting code is welcome. When removing a feature, remove its tests, config, docs and dead dependencies in the same change, and confirm nothing else imports it (`trailblazer uses NAME` or a typecheck).
 - Dependencies: before adding one, prefer the platform (Bun, Node built-ins, Effect). A dependency that could be reimplemented in under ~10K lines is a candidate to drop and reimplement in-tree. Pin exact versions in `package.json`; commit `bun.lock`.
 
@@ -87,3 +87,11 @@ This is our own OpenCode, forked from `anomalyco/opencode`. Our branch is `local
 - Restart the server only when no session is running; never kill an agent's work to deploy.
 - The server listens on loopback only and runs without a password (`OPENCODE_SERVER_AUTH=disabled` in `~/.config/opencode-local/server.env`; our patch refuses that setting on any non-loopback address). Never bind it to another address without first putting a password there. Secrets (`auth.json`, provider keys, any server password) never go into the repository, logs, prompts or commit messages.
 - Other tools talk to this server: the VORTEX OpenCode adapter (`~/projects/vortex/skills/vortex/adapters/opencode.mjs`) and `~/.claude/skills/manage-opencode/oc.py`. A change to the HTTP API must keep them working or update them in the same piece of work.
+
+## Repository rules (effective 2026-10-25)
+
+- ISSUES = git-bug. File the bug before committing: `git bug bug new -t "..." -F file --non-interactive`. Labels are kanban columns: status:todo|doing|done, plus kind:*, severity:high|med|low, area:*. Bug refs stay local: the global pre-push refuses refs/bugs and refs/identities unless ALLOW_BUG_PUSH=1.
+- COMMIT MESSAGE: whole message incl. trailers <=255 chars and must cite an EXISTING bug as `bug:<id>`; details go in the bug, not the message. Only git's automatic "Merge branch/remote-tracking branch '...'" messages are exempt.
+- NO PRIVATE STRINGS anywhere (commits, bug text, files, PRs, notes): no Claude-Session lines or claude.ai links, no session ids, no names or e-mail addresses, no city/timezone, no /home/<user> paths, no project or persona names in commit messages. Pattern list: ~/.config/git/pii-patterns.
+- IDENTITY devlux76 <devlux76@users.noreply.github.com>; commit dates are UTC (post-commit/post-merge hooks restamp). Global hooks in ~/.config/git/hooks (core.hooksPath) enforce all of this. Never use --no-verify.
+- HISTORY: older SHAs are gone; cite files, docs or bug ids instead. Pushing is disabled for llama.cpp's origin and opencode's upstream remote; opencode pushes only to the operator's own fork.
