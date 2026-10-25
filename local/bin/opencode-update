@@ -63,9 +63,7 @@ main() {
 
   if [[ "$mode" == "update" ]]; then
     echo "syncing $fork dev from upstream"
-    gh api -X POST "repos/$fork/merge-upstream" -f branch=dev >/dev/null || fail "$state" "GitHub fork sync failed"
-    git fetch -q upstream dev
-    git fetch -q origin
+    sync_fork || fail "$state" "fetching upstream dev failed"
     merge_upstream "$repo" "$state"
   fi
   install_policy
@@ -130,6 +128,20 @@ ensure_envfile() {
 # Our policy files (agent guides, project OpenCode config) are versioned under
 # local/agents/<path> and installed, untracked, at <path>. Upstream's copies collide
 # with every upstream edit of them; resolve those collisions by keeping ours.
+# Fast-forward the fork's dev to upstream/dev over git (SSH), not the GitHub API:
+# the API refuses upstream workflow-file changes without the token's workflow
+# scope (opencode:738d90b). Only the fetch is fatal; the merge below reads
+# upstream/dev directly, so a fork dev that cannot fast-forward is a warning.
+sync_fork() {
+  git fetch -q upstream dev || return 1
+  git fetch -q origin || echo "warning: fetching origin failed; fork dev not synced"
+  if git merge-base --is-ancestor origin/dev upstream/dev 2>/dev/null; then
+    git push -q origin upstream/dev:refs/heads/dev || echo "warning: pushing fork dev failed; continuing with upstream/dev"
+  else
+    echo "warning: fork dev has diverged from upstream dev; not pushed"
+  fi
+}
+
 merge_upstream() {
   local repo="$1" state="$2" aside policy
   aside="$(mktemp -d)"

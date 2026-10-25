@@ -87,4 +87,18 @@ if [[ "$(cd "$T/release/plugins/grounding" && find . -type f | sort | tr '\n' ' 
   echo "FAIL: release plugin files wrong: $(find "$T/release" -type f)"; exit 1
 fi
 echo "plugin installed into the release"
+echo "--- fork sync fast-forwards fork dev over git, no GitHub API"
+cd "$T"; git init -q --bare -b dev forkremote.git
+cd "$T/up"; git push -q "$T/forkremote.git" HEAD~1:refs/heads/dev
+cd "$T"; git clone -q up syncer; cd syncer; git remote rename origin upstream; git remote add origin "$T/forkremote.git"
+sync_fork
+[[ "$(git -C "$T/forkremote.git" rev-parse dev)" == "$(git rev-parse upstream/dev)" ]] || { echo "FAIL: fork dev not fast-forwarded"; exit 1; }
+echo "fork dev fast-forwarded"
+
+echo "--- a diverged fork dev is a warning, not a failure"
+cd "$T"; git clone -q forkremote.git div; cd div; git config user.email t@t; git config user.name t; git checkout -q dev
+git commit -q --allow-empty -m "fork-only"; git push -q origin dev
+cd "$T/syncer"; out=$(sync_fork); echo "$out" | grep -q "diverged" || { echo "FAIL: no divergence warning"; exit 1; }
+echo "diverged fork dev only warned"
+
 echo ALL_OK
