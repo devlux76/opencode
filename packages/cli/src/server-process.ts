@@ -18,6 +18,7 @@ import { ServiceRegistration } from "./services/service-registration"
 import { RemoteTunnel } from "./services/remote-tunnel"
 import { WebUi } from "./services/web-ui"
 import { databasePath } from "./database-path"
+import { authDisabled } from "./local-auth"
 
 export type Mode = "default" | "service" | "stdio"
 
@@ -87,13 +88,15 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
         delete process.env.OPENCODE_PASSWORD
         delete process.env.OPENCODE_SERVER_PASSWORD
       }
-      const password =
-        options.mode === "service"
+      const noAuth = yield* Effect.try(() => authDisabled(process.env, hostname))
+      const password = noAuth
+        ? undefined
+        : options.mode === "service"
           ? config.password || randomBytes(32).toString("base64url")
           : environmentPassword
             ? Redacted.value(environmentPassword)
             : randomBytes(32).toString("base64url")
-      if (!password) return yield* Effect.fail(new Error("Missing server password"))
+      if (!noAuth && !password) return yield* Effect.fail(new Error("Missing server password"))
       const instanceID = randomUUID()
       const transform = yield* WebUi.handler()
       const remote = { urls: [] as ReadonlyArray<string> }
@@ -147,10 +150,11 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
           : {
               onListen: (address, shutdown) =>
                 Effect.gen(function* () {
-                  if (!config.password) yield* ServiceConfig.password(password)
+                  if (!config.password && password) yield* ServiceConfig.password(password)
                   return yield* ServiceRegistration.register({
                     address,
-                    password,
+                    // Empty when auth is disabled; the server ignores client credentials then.
+                    password: password ?? "",
                     id: instanceID,
                     file: serviceOptions.file,
                     shutdown,
@@ -204,7 +208,7 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       }
       const url = HttpServer.formatAddress(server.address)
       console.log(options.mode === "stdio" ? JSON.stringify({ url }) : `server listening on ${url}`)
-      if (foreground && !environmentPassword) console.log(`server password ${password}`)
+      if (foreground && !environmentPassword && password) console.log(`server password ${password}`)
       return yield* options.mode === "service"
         ? server.shutdown
         : options.mode === "stdio"

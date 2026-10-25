@@ -1,0 +1,11 @@
+# Installed at ~/.config/systemd/user/opencode-update.timer.
+[Unit]
+Description=Daily OpenCode fork update
+
+[Timer]
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

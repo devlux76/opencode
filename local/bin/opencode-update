@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# opencode-update: keep our OpenCode fork current and deployed.
+#
+#   opencode-update               sync fork dev, merge upstream/dev into local, test, build, install, restart
+#   opencode-update --build-only  skip the sync and merge; test, build and install the current local branch
+#   opencode-update --no-restart  install but leave the running server alone
+#   opencode-update --rollback    point `current` at the previous release and restart
+#   opencode-update --policy      only link our versioned policy files (local/agents) into place
+#
+# Never pushes anywhere but our fork. A merge conflict outside the untracked
+# policy files, a failed test, build or smoke check stops the run and leaves the
+# deployed release untouched. Status: ~/.local/state/opencode-local/status.json.
+set -euo pipefail
+# Under errexit, write conditionals as `if` blocks: a failing `cond && action` as a
+# function's or loop's last command makes it return non-zero and silently ends the run.
+
+main() {
+  local repo="${OPENCODE_REPO:-$HOME/vendor/opencode}"
+  local fork="${OPENCODE_FORK:-devlux76/opencode}"
+  local root="$HOME/.local/share/opencode-local"
+  local state="$HOME/.local/state/opencode-local"
+  local envfile="$HOME/.config/opencode-local/server.env"
+  local unit="opencode.service"
+  local bun="$HOME/.bun/bin/bun"
+  local data="${XDG_DATA_HOME:-$HOME/.local/share}/opencode"
+  local dbbackups="$HOME/.local/share/opencode-backups/daily"
+  local idle_wait_s="${OPENCODE_UPDATE_IDLE_WAIT_S:-21600}"
+  local mode="update" restart=1
+
+  for arg in "$@"; do
+    case "$arg" in
+      --build-only) mode="build" ;;
+      --rollback) mode="rollback" ;;
+      --policy) mode="policy" ;;
+      --no-restart) restart=0 ;;
+      -h|--help) sed -n '2,13p' "$0"; return 0 ;;
+      *) echo "unknown argument: $arg" >&2; return 2 ;;
+    esac
+  done
+
+  if [[ "$mode" == "policy" ]]; then
+    cd "$repo"
+    install_policy
+    return 0
+  fi
+
+  mkdir -p "$root/releases" "$state" "$dbbackups"
+  exec 9>"$state/update.lock"
+  flock -n 9 || { echo "another opencode-update is running" >&2; return 1; }
+  exec > >(while IFS= read -r line; do printf '%s %s\n' "$(date -Is)" "$line"; done | tee -a "$state/update.log") 2>&1
+
+  ensure_envfile "$envfile"
+  if [[ "$mode" == "rollback" ]]; then
+    rollback "$root"
+    if [[ $restart == 1 ]]; then restart_when_idle "$unit" "$envfile" "$idle_wait_s" "$data" "$dbbackups"; fi
+    status "$state" ok "rolled back to $(basename "$(readlink -f "$root/current")")"
+    return 0
+  fi
+
+  cd "$repo"
+  [[ "$(git branch --show-current)" == "local" ]] || fail "$state" "$repo is not on branch local"
+  [[ -z "$(git status --porcelain --untracked-files=no)" ]] || fail "$state" "$repo has uncommitted changes to tracked files"
+
+  if [[ "$mode" == "update" ]]; then
+    echo "syncing $fork dev from upstream"
+    gh api -X POST "repos/$fork/merge-upstream" -f branch=dev >/dev/null || fail "$state" "GitHub fork sync failed"
+    git fetch -q upstream dev
+    git fetch -q origin
+    merge_upstream "$repo" "$state"
+  fi
+  install_policy
+
+  local sha version
+  sha="$(git rev-parse --short=9 HEAD)"
+  version="$(jq -r .version packages/cli/package.json)-local.$sha"
+  if [[ -x "$root/releases/$version/opencode" && "$(basename "$(readlink -f "$root/current" 2>/dev/null || true)")" == "$version" ]]; then
+    echo "already deployed: $version"
+    status "$state" ok "already deployed $version"
+    return 0
+  fi
+
+  echo "installing dependencies"
+  "$bun" install --frozen-lockfile >/dev/null || "$bun" install >/dev/null || fail "$state" "bun install failed"
+  run_checks "$repo" "$bun" || { git checkout -q -- . ; fail "$state" "checks failed at $sha"; }
+
+  echo "building $version"
+  (cd packages/cli && OPENCODE_CHANNEL=local OPENCODE_VERSION="$version" "$bun" run script/build.ts --single) \
+    > "$state/build.log" 2>&1 || { git checkout -q -- . ; fail "$state" "build failed at $sha (see $state/build.log)"; }
+  # The build runs its own `bun install`, which reorders package manifests.
+  git checkout -q -- .
+  local built="$repo/packages/cli/dist/cli-linux-x64/bin/opencode"
+  [[ "$("$built" --version)" == "opencode v$version" ]] || fail "$state" "built binary reports the wrong version"
+
+  smoke "$built" || fail "$state" "smoke check failed for $version"
+
+  mkdir -p "$root/releases/$version"
+  cp "$built" "$root/releases/$version/opencode.tmp"
+  mv "$root/releases/$version/opencode.tmp" "$root/releases/$version/opencode"
+  install_plugins "$repo" "$root/releases/$version"
+  ln -sfn "releases/$version" "$root/current.tmp"
+  mv -T "$root/current.tmp" "$root/current"
+  echo "installed $version"
+  prune "$root"
+
+  if [[ "$mode" == "update" ]]; then
+    git push -q --no-verify origin local || echo "warning: push of local to $fork failed"
+  fi
+  if [[ $restart == 1 ]]; then restart_when_idle "$unit" "$envfile" "$idle_wait_s" "$data" "$dbbackups"; fi
+  status "$state" ok "deployed $version"
+}
+
+fail() { echo "FAILED: $2"; status "$1" failed "$2"; exit 1; }
+
+status() {
+  jq -n --arg time "$(date -Is)" --arg result "$2" --arg message "$3" \
+    --arg current "$(basename "$(readlink -f "$HOME/.local/share/opencode-local/current" 2>/dev/null || echo none)")" \
+    '{time:$time,result:$result,message:$message,current:$current}' > "$1/status.json.tmp"
+  mv "$1/status.json.tmp" "$1/status.json"
+}
+
+ensure_envfile() {
+  if [[ -f "$1" ]]; then return 0; fi
+  mkdir -p "$(dirname "$1")"
+  # We are entirely local: the loopback-only server runs without a password (our patch).
+  # To require one, replace this with OPENCODE_SERVER_PASSWORD=... and OPENCODE_PASSWORD=...
+  (umask 077; printf 'OPENCODE_SERVER_AUTH=disabled\n' > "$1")
+  echo "created $1"
+}
+
+# Our policy files (agent guides, project OpenCode config) are versioned under
+# local/agents/<path> and installed, untracked, at <path>. Upstream's copies collide
+# with every upstream edit of them; resolve those collisions by keeping ours.
+merge_upstream() {
+  local repo="$1" state="$2" aside policy
+  aside="$(mktemp -d)"
+  mapfile -t policy < <(policy_paths)
+  mapfile -t removed < <(grep -v '^\s*\(#\|$\)' local/removed-paths.txt 2>/dev/null || true)
+  for p in "${policy[@]}"; do
+    # -L too: an installed policy is a relative link, which dangles once moved aside.
+    if [[ -e "$p" || -L "$p" ]]; then mkdir -p "$aside/$(dirname "$p")"; mv "$p" "$aside/$p"; fi
+  done
+  local restore='for q in "${policy[@]}"; do if [[ -e "$aside/$q" || -L "$aside/$q" ]]; then rm -f "$q"; mkdir -p "$(dirname "$q")"; mv "$aside/$q" "$q"; fi; done'
+
+  echo "merging upstream/dev ($(git rev-parse --short=9 upstream/dev)) into local"
+  if ! git merge -q --no-edit upstream/dev; then
+    local unresolved=() p
+    mapfile -t unresolved < <(git diff --name-only --diff-filter=U)
+    for p in "${unresolved[@]}"; do
+      if printf '%s\n' "${policy[@]}" | grep -qxF "$p"; then git rm -q --cached --ignore-unmatch -- "$p"; rm -f -- "$p"
+      elif is_removed "$p" "${removed[@]}"; then git rm -q -f --ignore-unmatch -- "$p"
+      else
+        git merge --abort; eval "$restore"
+        fail "$state" "merge conflict in $p; resolve by hand in $repo"
+      fi
+    done
+    git -c core.editor=true commit -q --no-edit
+  fi
+  # Upstream may have added files under a path we removed.
+  local readded=0 r
+  for r in "${removed[@]}"; do
+    if [[ -n "$(git ls-files -- "$r")" ]]; then git rm -rq -f -- "$r"; readded=1; fi
+  done
+  if [[ $readded == 1 ]]; then git commit -q -m "local: keep removed paths removed"; fi
+  # Agent guides are ours: drop any AGENTS.md upstream adds, and say where one is needed.
+  local guide dropped=0
+  while IFS= read -r guide; do
+    if [[ -z "$guide" || "$guide" == local/* ]] || printf '%s\n' "${policy[@]}" | grep -qxF "$guide"; then continue; fi
+    git rm -q -f -- "$guide"; dropped=1
+    echo "dropped upstream agent guide $guide: write ours at local/agents/$guide"
+  done < <(git ls-files -- 'AGENTS.md' '*/AGENTS.md')
+  if [[ $dropped == 1 ]]; then git commit -q -m "local: drop upstream agent guides"; fi
+  # Upstream may have re-added a policy file we untrack.
+  for p in "${policy[@]}"; do
+    if git ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+      git rm -q --cached -- "$p"; rm -f -- "$p"
+      git commit -q -m "local: keep $p untracked"
+    fi
+  done
+  eval "$restore"
+  find "$aside" -depth -type d -empty -delete
+  install_policy
+}
+
+# Relative paths of our versioned policy files.
+policy_paths() {
+  git ls-files -- local/agents | sed 's|^local/agents/||'
+}
+
+# Link each versioned policy file into place and keep it out of git status. A real
+# file in place that differs from ours is someone's unversioned edit: report it, keep it.
+install_policy() {
+  local exclude p target
+  exclude="$(git rev-parse --git-path info/exclude)"
+  mkdir -p "$(dirname "$exclude")"; touch "$exclude"
+  # OpenCode writes plugin installs and references under .opencode/. (A linked
+  # .gitignore cannot do this: git refuses to follow a symlinked .gitignore.)
+  if ! grep -qxF "/.opencode/" "$exclude"; then printf '/.opencode/\n' >> "$exclude"; fi
+  while IFS= read -r p; do
+    if [[ -z "$p" ]]; then continue; fi
+    if ! grep -qxF "/$p" "$exclude"; then printf '/%s\n' "$p" >> "$exclude"; fi
+    target="$(realpath -m --relative-to="$(dirname "$p")" "local/agents/$p")"
+    if [[ -f "$p" && ! -L "$p" ]] && ! cmp -s "$p" "local/agents/$p"; then
+      echo "$p differs from local/agents/$p: move your edit there, commit it, then delete $p"
+      continue
+    fi
+    mkdir -p "$(dirname "$p")"
+    ln -sfn "$target" "$p"
+  done < <(policy_paths)
+}
+
+# Our plugins ship inside each release (<release>/plugins/<name>, the files their package.json
+# lists), so the live server never loads plugin source from a checkout where an edit goes live.
+OUR_PLUGINS=(packages/plugins/grounding)
+install_plugins() {
+  local repo="$1" release="$2" dir name file files
+  for dir in "${OUR_PLUGINS[@]}"; do
+    name="$(basename "$dir")"
+    mapfile -t files < <(jq -r '.files[]' "$repo/$dir/package.json")
+    mkdir -p "$release/plugins/$name"
+    for file in "${files[@]}"; do cp "$repo/$dir/$file" "$release/plugins/$name/$file"; done
+  done
+}
+
+# True when $1 is one of the removed paths or lies under one.
+is_removed() {
+  local path="$1" r; shift
+  for r in "$@"; do
+    if [[ "$path" == "$r" || "$path" == "$r"/* ]]; then return 0; fi
+  done
+  return 1
+}
+
+# Our patches' tests, then the typecheck of the packages they touch.
+run_checks() {
+  local repo="$1" bun="$2" pkg file
+  while read -r pkg file; do
+    [[ -z "$pkg" || "$pkg" == \#* ]] && continue
+    echo "test $pkg/$file"
+    (cd "$repo/$pkg" && "$bun" test --timeout 30000 "$file") || return 1
+  done < "$repo/local/tests.txt"
+  for file in "$repo"/local/test/*.test.sh; do
+    echo "test $file"
+    bash "$file" || return 1
+  done
+  for pkg in packages/cli packages/core packages/server "${OUR_PLUGINS[@]}"; do
+    echo "typecheck $pkg"
+    (cd "$repo/$pkg" && "$bun" run typecheck) || return 1
+  done
+}
+
+# Start the new binary on a scratch port with empty data and the real config;
+# it must answer an authenticated request.
+smoke() {
+  local bin="$1" tmp port pw pid code=000 i
+  tmp="$(mktemp -d)"; pw="smoke-$RANDOM$RANDOM"
+  port="$(python3 -I -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')"
+  XDG_DATA_HOME="$tmp/data" XDG_STATE_HOME="$tmp/state" XDG_CACHE_HOME="$tmp/cache" OPENCODE_SERVER_PASSWORD="$pw" \
+    "$bin" serve --port "$port" --hostname 127.0.0.1 > "$tmp/serve.log" 2>&1 < /dev/null &
+  pid=$!
+  for i in $(seq 1 60); do
+    code="$(curl -s -o /dev/null -w '%{http_code}' -u "opencode:$pw" "http://127.0.0.1:$port/api/session" || true)"
+    [[ "$code" == 200 ]] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  echo "smoke: GET /api/session -> $code"
+  [[ "$code" == 200 ]] || { tail -20 "$tmp/serve.log"; rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+}
+
+rollback() {
+  local root="$1" now prev
+  now="$(readlink -f "$root/current")"
+  prev="$(ls -1dt "$root"/releases/*/ | sed 's#/$##' | { grep -vxF "$now" || true; } | head -1)"
+  [[ -n "$prev" ]] || { echo "no previous release"; exit 1; }
+  ln -sfn "releases/$(basename "$prev")" "$root/current.tmp"; mv -T "$root/current.tmp" "$root/current"
+  echo "current -> $(basename "$prev")"
+}
+
+prune() {
+  local root="$1" now
+  now="$(readlink -f "$root/current")"
+  ls -1dt "$root"/releases/*/ | sed 's#/$##' | { grep -vxF "$now" || true; } | tail -n +3 | while read -r old; do
+    echo "pruning $(basename "$old")"; rm -rf -- "$old"
+  done
+}
+
+# Restart only when no session is running: wait on the server's own events
+# (idle / execution ended) and re-check; the wait limit is a backstop, after
+# which the restart is left for the next run rather than killing work.
+restart_when_idle() {
+  local unit="$1" envfile="$2" limit="$3" data="$4" dbbackups="$5" pw url="http://127.0.0.1:4096" deadline running auth=()
+  if ! systemctl --user is-active -q "$unit"; then echo "$unit not active; not restarting"; return 0; fi
+  pw="$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' "$envfile")"
+  if [[ -n "$pw" ]]; then auth=(-u "opencode:$pw"); fi
+  deadline=$(( $(date +%s) + limit ))
+  while :; do
+    running="$(curl -sf "${auth[@]}" "$url/api/session/active" | jq -r '.data | keys | length' 2>/dev/null || echo 0)"
+    [[ "$running" == 0 ]] && break
+    (( $(date +%s) < deadline )) || { echo "sessions still running after ${limit}s; restart deferred to the next run"; return 0; }
+    echo "waiting for $running running session(s) to finish"
+    timeout $(( deadline - $(date +%s) )) curl -sN "${auth[@]}" -H 'accept: text/event-stream' "$url/api/event" \
+      | grep -m1 -qE '"type":"session\.(idle|execution\.(succeeded|failed|interrupted))"' || true
+  done
+  if [[ -f "$data/opencode.db" ]]; then
+    local ts; ts="$(date +%Y%m%d-%H%M%S)"
+    sqlite3 "$data/opencode.db" ".backup '$dbbackups/opencode-$ts.db'" && echo "database backed up"
+    ls -1t "$dbbackups"/opencode-*.db 2>/dev/null | tail -n +3 | xargs -r rm -f
+  fi
+  systemctl --user restart "$unit"
+  echo "restarted $unit"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; exit; fi

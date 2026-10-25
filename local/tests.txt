@@ -1,0 +1,9 @@
+# Tests for our local patches, run by opencode-update before every build: <package dir> <test file>
+packages/cli test/database-path.test.ts
+packages/core test/tool-shell-default-timeout.test.ts
+packages/cli test/local-auth.test.ts
+packages/server test/local-no-auth.test.ts
+packages/plugins/grounding test/trailblazer.test.ts
+packages/plugins/grounding test/grounding.test.ts
+packages/plugins/grounding test/plugin.test.ts
+packages/plugins/grounding test/verify.test.ts

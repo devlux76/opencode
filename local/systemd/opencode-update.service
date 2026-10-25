@@ -1,0 +1,10 @@
+# Installed at ~/.config/systemd/user/opencode-update.service; run daily by opencode-update.timer.
+[Unit]
+Description=Merge upstream OpenCode dev into our fork, build and deploy
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/vendor/opencode/local/bin/opencode-update
+TimeoutStartSec=8h

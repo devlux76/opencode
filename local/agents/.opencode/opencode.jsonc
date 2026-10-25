@@ -1,0 +1,15 @@
+// Project config for OpenCode sessions working in this repository. Ours, versioned at
+// local/agents/.opencode/opencode.jsonc and linked into place by opencode-update.
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "effect": {
+      "repository": "github.com/Effect-TS/effect-smol",
+      "description": "Effect v4 source: check exact APIs here, not from memory or v2/v3 examples",
+    },
+    "opencode-data": {
+      "path": "~/.local/share/opencode",
+      "description": "Live OpenCode data: opencode.db (the operator's history; read-only, copy before experimenting) and log/",
+    },
+  },
+}

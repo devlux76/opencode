@@ -57,6 +57,8 @@ export function unauthorizedResponse(request: HttpServerRequest.HttpServerReques
 }
 
 export function authorizedRequest(request: HttpServerRequest.HttpServerRequest, config: ServerAuth.Info) {
+  // Our fork: a server started without a password (loopback only) authorizes every request.
+  if (!ServerAuth.required(config)) return Effect.succeed(true)
   return credentialFromRequest(request).pipe(
     Effect.map((credential) => ServerAuth.authorized(credential, config) || authorizedSessionCookie(request, config)),
   )

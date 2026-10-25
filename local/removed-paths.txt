@@ -1,0 +1,29 @@
+# Paths deleted from our fork; opencode-update keeps them deleted across upstream merges.
+# Electron desktop app (we run the server, TUI and web UI). Everything except
+# packages/desktop/icons, which the web UI build (packages/app/vite.icons.ts) reads.
+packages/desktop/.gitignore
+packages/desktop/AGENTS.md
+packages/desktop/README.md
+packages/desktop/drizzle.config.ts
+packages/desktop/electron-builder.config.test.ts
+packages/desktop/electron-builder.config.ts
+packages/desktop/electron.vite.config.test.ts
+packages/desktop/electron.vite.config.ts
+packages/desktop/package.json
+packages/desktop/resources
+packages/desktop/scripts
+packages/desktop/src
+packages/desktop/sst-env.d.ts
+packages/desktop/tsconfig.json
+# opencode.ai website, Zen/Go billing and its backend (their hosted business).
+packages/console
+# Public model stats site and its Lambdas.
+packages/stats
+# opencode.ai/v2 Astro website and docs.
+services/www
+# SST/Pulumi deployment of their cloud (Cloudflare, AWS, Stripe, PlanetScale).
+infra
+sst.config.ts
+# Upstream's project OpenCode config: their triage agent, GitHub tools, release and push
+# commands, translation glossaries and skills. Ours is versioned in local/agents/.opencode.
+.opencode

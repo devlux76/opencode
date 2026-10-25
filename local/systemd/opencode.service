@@ -1,0 +1,23 @@
+# Installed at ~/.config/systemd/user/opencode.service (user unit; lingering is on).
+# The OpenCode server every VORTEX wake and every manage-opencode call talks to.
+[Unit]
+Description=OpenCode server, our fork (port 4096)
+After=network-online.target
+
+[Service]
+Type=simple
+# Sessions inherit this directory unless a request names another.
+WorkingDirectory=%h/projects/vortex
+# OPENCODE_SERVER_AUTH=disabled (our patch: no password on loopback); created by opencode-update.
+EnvironmentFile=%h/.config/opencode-local/server.env
+# Shell tool foreground default (our patch; upstream's is two minutes).
+Environment=OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=600000
+Environment=BROWSER=true
+# A login shell, so the agent's tools (bun, mix, mise shims) are on PATH as in a terminal.
+ExecStart=/bin/bash -lc 'exec %h/.local/share/opencode-local/current/opencode serve --port 4096 --hostname 127.0.0.1'
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+[Install]
+WantedBy=default.target
