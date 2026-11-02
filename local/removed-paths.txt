@@ -12,6 +12,8 @@ packages/desktop/electron.vite.config.ts
 packages/desktop/package.json
 packages/desktop/resources
 packages/desktop/scripts
+# upstream renamed scripts/ -> script/ (2026-10)
+packages/desktop/script
 packages/desktop/src
 packages/desktop/sst-env.d.ts
 packages/desktop/tsconfig.json
@@ -27,3 +29,5 @@ sst.config.ts
 # Upstream's project OpenCode config: their triage agent, GitHub tools, release and push
 # commands, translation glossaries and skills. Ours is versioned in local/agents/.opencode.
 .opencode
+# Desktop release signing entitlements (desktop app is stripped)
+.github/release/entitlements
