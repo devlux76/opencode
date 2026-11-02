@@ -160,6 +160,9 @@ merge_upstream() {
     for p in "${unresolved[@]}"; do
       if printf '%s\n' "${policy[@]}" | grep -qxF "$p"; then git rm -q --cached --ignore-unmatch -- "$p"; rm -f -- "$p"
       elif is_removed "$p" "${removed[@]}"; then git rm -q -f --ignore-unmatch -- "$p"
+      # Agent guides are ours (see below): an upstream edit to one we never versioned
+      # (e.g. after an upstream package rename) is dropped, like a newly added one.
+      elif [[ "$p" != local/* && ( "$p" == AGENTS.md || "$p" == */AGENTS.md ) ]]; then git rm -q -f --ignore-unmatch -- "$p"
       else
         git merge --abort; eval "$restore"
         fail "$state" "merge conflict in $p; resolve by hand in $repo"
