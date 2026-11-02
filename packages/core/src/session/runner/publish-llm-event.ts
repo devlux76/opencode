@@ -1,5 +1,5 @@
-import { type LLMEvent, type ProviderMetadata, type ToolResultValue } from "@opencode/ai"
-import { isRecord } from "@opencode/ai/utils/record"
+import { type LLMEvent, type ProviderMetadata, type ToolResultValue } from "@opencode/ai/effect"
+import { isRecord } from "@opencode/util/record"
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
 import type { RelativePath } from "@opencode/schema/schema"
@@ -411,7 +411,6 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
 
   const publishStepFailure = Effect.fnUntraced(function* (details?: {
     readonly cost?: Money.USD
-    readonly allowance?: Money.USD
     readonly tokens?: TokenUsage.Info
     readonly snapshot?: Snapshot.ID
     readonly files?: readonly RelativePath[]
@@ -546,27 +545,6 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         })
         return
       }
-      case "tool-error": {
-        const tool = tools.get(event.id)
-        if (!tool?.called) return yield* Effect.die(new Error(`Tool error before call: ${event.id}`))
-        if (tool.name !== event.name)
-          return yield* Effect.die(new Error(`Tool error name changed for ${event.id}: ${tool.name} -> ${event.name}`))
-        if (tool.settled) return yield* Effect.die(new Error(`Duplicate tool error: ${event.id}`))
-        tool.settled = true
-        yield* bus.publish(SessionEvent.Tool.Failed, {
-          sessionID: input.sessionID,
-          assistantMessageID,
-          id: event.id,
-          error:
-            event.message === `Unknown tool: ${event.name}`
-              ? { type: "tool.unknown", message: event.message }
-              : { type: "tool.execution", message: event.message },
-          ...failureSnapshot(tool),
-          executed: tool.providerExecuted,
-          native: native(event.providerMetadata),
-        })
-        return
-      }
       case "step-finish":
         yield* flushFragments()
         if (stepSettlement) return yield* Effect.die(new Error("Duplicate step finish"))
@@ -584,14 +562,8 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         return
       case "finish":
         return
-      case "provider-error":
-        providerFailed = true
-        yield* failAssistant({ type: "provider.unknown", message: event.message })
-        return
     }
   }, Effect.uninterruptible)
-
-  const publishTraced = Effect.fn("SessionRunner.publishLLMEvent")(publish)
 
   const progress = Effect.fnUntraced(function* (id: string, update: Tool.Metadata) {
     const tool = tools.get(id)
@@ -626,11 +598,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
   })
 
   return {
-    publish: (event: LLMEvent) => {
-      if (event.type === "text-delta" || event.type === "reasoning-delta" || event.type === "tool-input-delta")
-        return publish(event)
-      return publishTraced(event)
-    },
+    publish: (event: LLMEvent): Effect.Effect<void> => publish(event),
     progress,
     toolExecution,
     flush,
