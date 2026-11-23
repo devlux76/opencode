@@ -73,7 +73,7 @@ test("problems are named, with what the check cannot show", async () => {
   })
   expect(note).toBeDefined()
   expect(note!.startsWith('<trailblazer-evidence-check checked="3" problems="2">')).toBe(true)
-  expect(note).toContain("- src/gone.ts:4-8: missing (no such file in the repository)")
+  expect(note).toContain("- src/gone.ts:4-8: missing (no such file in the checked repository)")
   expect(note).toContain("- src/a.ts:8-40: bad-range (the file has 10 lines)")
   expect(note).toContain("A cited range that exists does not show the claim about it is true.")
   expect(note!.endsWith("</trailblazer-evidence-check>")).toBe(true)
@@ -85,4 +85,17 @@ test("a long answer is checked up to the cap, and says so", async () => {
   const note = await Verify.note({ repo: dir, sessionID: "s", text })
   expect(note).toContain('checked="40"')
   expect(note).toContain("Only the first 40 of 60 citations were checked.")
+})
+
+test("the note names the checked repository, so another repository's path reads as out of scope", async () => {
+  const dir = await repo()
+  const note = await Verify.note({
+    repo: dir,
+    sessionID: "s",
+    text: "Fixed packages/plugins/grounding/index.ts:43 in the other repository.",
+  })
+  expect(note).toContain(`Checked against ${dir} only; a citation from another repository shows as missing.`)
+  expect(note).toContain(
+    "- packages/plugins/grounding/index.ts:43-43: missing (no such file in the checked repository)",
+  )
 })

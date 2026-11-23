@@ -46,7 +46,7 @@ export async function check(repo: string, cites: Citation[]): Promise<Result[]> 
 async function one(root: string, cite: Citation): Promise<Result> {
   if (path.isAbsolute(cite.path) || cite.path.split(/[\\/]/).includes("..")) return { ...cite, status: "outside-repo" }
   const real = await realpath(path.join(root, cite.path)).catch(() => undefined)
-  if (!real) return { ...cite, status: "missing", detail: "no such file in the repository" }
+  if (!real) return { ...cite, status: "missing", detail: "no such file in the checked repository" }
   if (real !== root && !real.startsWith(root + path.sep)) return { ...cite, status: "outside-repo" }
   const text = await readFile(real).then(
     (bytes) => (bytes.length > MAX_FILE_BYTES ? undefined : bytes.toString("utf8")),
@@ -70,6 +70,7 @@ export async function note(input: { repo: string; sessionID: string; text: strin
   return [
     `<trailblazer-evidence-check checked="${results.length}" problems="${problems.length}">`,
     "Cited locations in the last answer that do not hold up against the repository as it is now:",
+    `Checked against ${input.repo} only; a citation from another repository shows as missing.`,
     ...problems.map(
       (result) =>
         `- ${result.path}:${result.first}-${result.last}: ${result.status}${result.detail ? ` (${result.detail})` : ""}`,
