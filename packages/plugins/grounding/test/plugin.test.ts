@@ -18,6 +18,7 @@ interface Harness {
 
 async function start(options: {
   repo?: string | undefined
+  repoRoot?: (directory: string) => Promise<string | undefined>
   answers?: Record<string, Trailblazer.Answer<unknown>>
   check?: Check
 }): Promise<Harness> {
@@ -68,7 +69,7 @@ async function start(options: {
   }
   const cleanup = await plugin({
     client,
-    repoRoot: async () => ("repo" in options ? options.repo : "/work"),
+    repoRoot: options.repoRoot ?? (async () => ("repo" in options ? options.repo : "/work")),
     check: options.check,
   }).setup(ctx)
   return {
@@ -269,5 +270,79 @@ test("after a grounded run succeeds, the checker's note goes before the next tas
   const later = request([...history, Message.user("task two"), Message.assistant("ok"), Message.user("task three")])
   await h.hooks.get("context")!(later)
   expect(later.messages.map(textOf).some((text) => text.includes("evidence-check"))).toBe(false)
+  await h.cleanup?.()
+})
+
+// shared:f26ac2c — a directory that was not a git repository when the session
+// started can become one mid-session (git init, watch, index, first commit).
+// The plugin must notice, not keep answering with the setup-time snapshot.
+
+test("a directory that becomes a git repository mid-session is grounded from the next task", async () => {
+  let git = false
+  const h = await start({
+    repoRoot: async () => (git ? "/work" : undefined),
+    answers: { trail: trail("t") },
+  })
+  await h.hooks.get("prompt")!(prompt("msg_1", "task one"))
+  const first = request([Message.user("task one")])
+  await h.hooks.get("context")!(first)
+  expect(h.calls).toEqual([])
+  expect(textOf(first.messages[0])).toContain("Grounding unavailable: /work/dir is not inside a git repository.")
+
+  git = true
+  await h.hooks.get("prompt")!(prompt("msg_2", "task two"))
+  const second = request([Message.user("task one"), Message.assistant("done"), Message.user("task two")])
+  await h.hooks.get("context")!(second)
+  expect(h.calls).toEqual([{ op: "trail", body: { repo: "/work", request: "task two", budget: 3000 } }])
+  expect(textOf(second.messages[2])).toContain('<trailblazer-grounding task="msg_2" repo="/work" source="trail">')
+  expect(textOf(second.messages.at(-1)!)).toBe("task two")
+})
+
+test("the lookup tools recover once the directory becomes a git repository", async () => {
+  let git = false
+  const h = await start({
+    repoRoot: async () => (git ? "/work" : undefined),
+    answers: { where: { ok: true, value: [{ id: 1 }] } },
+  })
+  const before = await h.tools[0].execute({ name: "x" }, {})
+  expect(before.content).toBe("Trailblazer lookups need a git repository; this location is not inside one.")
+  expect(h.calls).toEqual([])
+
+  git = true
+  const after = await h.tools[0].execute({ name: "x" }, {})
+  expect(after.content).toBe(JSON.stringify([{ id: 1 }], null, 1))
+  expect(h.calls).toEqual([{ op: "where", body: { repo: "/work", name: "x" } }])
+})
+
+test("the evidence checker starts working once the directory becomes a git repository", async () => {
+  let git = false
+  const checked: Array<{ repo: string; sessionID: string; text: string }> = []
+  const done = Promise.withResolvers<void>()
+  const h = await start({
+    repoRoot: async () => (git ? "/work" : undefined),
+    answers: { trail: trail("t") },
+    check: async (input) => {
+      checked.push(input)
+      done.resolve()
+      return undefined
+    },
+  })
+  expect(h.subscribed()).toBe(true)
+  await h.hooks.get("prompt")!(prompt("msg_1", "task one"))
+  await h.hooks.get("context")!(request([Message.user("task one")]))
+  h.emit({ type: "session.text.ended", data: { sessionID: "ses_1", text: "early" } })
+  h.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
+  await Bun.sleep(20)
+  expect(checked).toEqual([])
+
+  git = true
+  await h.hooks.get("prompt")!(prompt("msg_2", "task two"))
+  await h.hooks.get("context")!(
+    request([Message.user("task one"), Message.assistant("done"), Message.user("task two")]),
+  )
+  h.emit({ type: "session.text.ended", data: { sessionID: "ses_1", text: "final, see a.ts:1-3" } })
+  h.emit({ type: "session.execution.succeeded", data: { sessionID: "ses_1" } })
+  await done.promise
+  expect(checked).toEqual([{ repo: "/work", sessionID: "ses_1", text: "final, see a.ts:1-3" }])
   await h.cleanup?.()
 })
