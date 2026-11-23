@@ -240,14 +240,22 @@ async function checkGuide() {
   const members = contextMembers()
 
   await Promise.all(
-    [guide, path.join(pkg, "AGENTS.md")].map(async (doc) =>
-      (await read(doc)).split("\n").forEach((line, index) =>
-        [...line.matchAll(/\bctx\.([A-Za-z]+)/g)].forEach((match) => {
-          if (match[1] && !members.has(match[1]))
-            problems.push(`${relative(doc)}:${index + 1}  \`ctx.${match[1]}\` is not a context member`)
-        }),
-      ),
-    ),
+    [guide, path.join(pkg, "AGENTS.md")].map(async (doc) => {
+      // A removed doc names nothing: the local tree drops the upstream AGENTS.md guides.
+      const text = await Bun.file(doc)
+        .text()
+        .catch(() => undefined)
+      if (text === undefined) return
+      text
+        .replaceAll("\r\n", "\n")
+        .split("\n")
+        .forEach((line, index) =>
+          [...line.matchAll(/\bctx\.([A-Za-z]+)/g)].forEach((match) => {
+            if (match[1] && !members.has(match[1]))
+              problems.push(`${relative(doc)}:${index + 1}  \`ctx.${match[1]}\` is not a context member`)
+          }),
+        )
+    }),
   )
 }
 

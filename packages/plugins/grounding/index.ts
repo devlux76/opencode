@@ -40,7 +40,13 @@ export function plugin(deps: Deps = {}) {
       }
       const endpoint = typeof ctx.options.endpointFile === "string" ? ctx.options.endpointFile : Trailblazer.endpointFile()
       const client = deps.client ?? Trailblazer.connect({ file: endpoint })
-      const repo = await (deps.repoRoot ?? gitRoot)(ctx.location.directory)
+      let repo = await (deps.repoRoot ?? gitRoot)(ctx.location.directory)
+      // The directory can become a git repository mid-session (git init after the
+      // session started): re-resolve while undefined, cache once found.
+      const resolveRepo = async () => {
+        repo ??= await (deps.repoRoot ?? gitRoot)(ctx.location.directory)
+        return repo
+      }
       // Prompt text -> message ID per session, so a block can name the task it grounds.
       const prompts = new Map<string, Map<string, string>>()
       const blocks = new Map<string, { task: string; text: string }>()
@@ -71,8 +77,9 @@ export function plugin(deps: Deps = {}) {
         let block = blocks.get(event.sessionID)
         if (block?.task !== task) {
           const started = performance.now()
-          const retrieved = repo
-            ? await Grounding.retrieve(client, { ...settings, repo, request: text })
+          const current = await resolveRepo()
+          const retrieved = current
+            ? await Grounding.retrieve(client, { ...settings, repo: current, request: text })
             : unavailable(`${ctx.location.directory} is not inside a git repository`)
           // The block is not stored in the session, so this line is how anyone can see it happened.
           console.info(
@@ -80,7 +87,7 @@ export function plugin(deps: Deps = {}) {
               `${Math.round(performance.now() - started)} ms` +
               (retrieved.degraded ? ` degraded: ${retrieved.degraded}` : ""),
           )
-          block = { task, text: Grounding.render(task, repo ?? ctx.location.directory, retrieved) }
+          block = { task, text: Grounding.render(task, current ?? ctx.location.directory, retrieved) }
           blocks.set(event.sessionID, block)
         }
         const note = noteFor(notes, event.sessionID, task)
@@ -89,12 +96,12 @@ export function plugin(deps: Deps = {}) {
       })
 
       await ctx.tool.transform((editor) => {
-        for (const tool of tools(client, repo, settings.lightMs)) editor.add(tool)
+        for (const tool of tools(client, resolveRepo, settings.lightMs)) editor.add(tool)
       })
 
-      if (!deps.check || !repo) return
+      if (!deps.check) return
       const abort = new AbortController()
-      void followRuns(ctx, deps.check, repo, blocks, notes, abort.signal)
+      void followRuns(ctx, deps.check, resolveRepo, blocks, notes, abort.signal)
       return () => abort.abort()
     },
   })
@@ -102,7 +109,11 @@ export function plugin(deps: Deps = {}) {
 
 export default plugin({ check: Verify.note })
 
-function tools(client: Client, repo: string | undefined, timeoutMs: number): ToolInfo<JsonSchema.JsonSchema>[] {
+function tools(
+  client: Client,
+  resolveRepo: () => Promise<string | undefined>,
+  timeoutMs: number,
+): ToolInfo<JsonSchema.JsonSchema>[] {
   // Each tool forwards the named fields of its input to one Trailblazer operation.
   const tool = (
     name: string,
@@ -128,6 +139,7 @@ function tools(client: Client, repo: string | undefined, timeoutMs: number): Too
       additionalProperties: false,
     },
     execute: async (input: unknown) => {
+      const repo = await resolveRepo()
       if (!repo) return { content: "Trailblazer lookups need a git repository; this location is not inside one." }
       const body = pick(input, fields)
       if (typeof body === "string") return { content: body }
@@ -204,7 +216,7 @@ function noteFor(notes: Map<string, Note>, sessionID: string, task: string) {
 async function followRuns(
   ctx: Plugin.Context,
   check: Check,
-  repo: string,
+  resolveRepo: () => Promise<string | undefined>,
   blocks: Map<string, { task: string }>,
   notes: Map<string, Note>,
   signal: AbortSignal,
@@ -220,6 +232,8 @@ async function followRuns(
       const text = last.get(data.sessionID)
       last.delete(data.sessionID)
       if (!text) continue
+      const repo = await resolveRepo()
+      if (!repo) continue
       const note = await check({ repo, sessionID: data.sessionID, text }).catch((error) => {
         console.warn("grounding: the evidence check failed", data.sessionID, error)
         return undefined
